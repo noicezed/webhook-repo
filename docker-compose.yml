@@ -2,20 +2,39 @@ version: '3'
 services:
   mongo:
     image: mongo
+    container_name: mongo
     ports:
       - 27017:27017
-    command: ["mongod", "--replSet", "rs0"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - ./mongo-data:/data/db
-  
+    healthcheck:
+      test: |
+        echo "
+        try { 
+          rs.status(); 
+          print('Replica set already initialized'); 
+        } catch (err) { 
+          print('Initializing replica set...'); 
+          rs.initiate(); 
+          print('Replica set initialized'); 
+        }
+        " | mongosh --port 27017 --quiet
+      interval: 10s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+
   flask:
     build: .
     ports:
       - "5000:5000"
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
     environment:
-      - MONGO_URI=mongodb://mongo:27017/git_actions_db
+      - MONGO_URI=mongodb://mongo:27017/git_actions_db?replicaSet=rs0
+    restart: unless-stopped
 
   ngrok:
     image: ngrok/ngrok:latest
