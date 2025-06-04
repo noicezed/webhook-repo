@@ -1,4 +1,4 @@
-version: '3'
+version: "3"
 services:
   mongo:
     image: mongo
@@ -35,6 +35,12 @@ services:
     environment:
       - MONGO_URI=mongodb://mongo:27017/git_actions_db?replicaSet=rs0
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/webhook"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   ngrok:
     image: ngrok/ngrok:latest
@@ -48,3 +54,9 @@ services:
       - ./ngrok.yml:/etc/ngrok.yml
     ports:
       - "4040:4040"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4040/api/tunnels"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s

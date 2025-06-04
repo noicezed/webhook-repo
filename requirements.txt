@@ -3,3 +3,5 @@ Flask-Cors
 Flask-Login
 Flask-PyMongo
 pymongo
+flask-socketio
+eventlet

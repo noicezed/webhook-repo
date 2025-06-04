@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MongoDB Watch + Flask-SocketIO</title>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        th {
+            background-color: #f5f5f5;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        tr:hover {
+            background-color: #f0f0f0;
+        }
+        .new td:first-child { border-left: 4px solid #4CAF50; }
+        .updated td:first-child { border-left: 4px solid #2196F3; }
+        .replaced td:first-child { border-left: 4px solid #FF9800; }
+        .deleted td:first-child { border-left: 4px solid #f44336; }
+        #connection-status {
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+        }
+        #debug-log {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f0f0f0;
+            padding: 10px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <h2>Live Git Actions Updates</h2>
+    <div id="connection-status">Connecting...</div>
+    <div id="debug-log"></div>
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>ID</th>
+                <th>Action</th>
+                <th>Repository</th>
+                <th>Branch From</th>
+                <th>Branch To</th>
+                <th>Author</th>
+                <th>Timestamp</th>
+            </tr>
+        </thead>
+        <tbody id="updates">
+        </tbody>
+    </table>
+
+    <script>
+        // Debug logging function for displaying logs in the UI
+        function debugLog(message, isError = false) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logDiv = document.getElementById('debug-log');
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            if (isError) {
+                logEntry.style.color = 'red';
+            }
+            logDiv.appendChild(logEntry);
+            logDiv.scrollTop = logDiv.scrollHeight; // Auto-scroll to bottom
+            
+            if (isError) {
+                console.error(message);
+            } else {
+                console.log(message);
+            }
+        }
+
+        // Get DOM elements
+        const statusDiv = document.getElementById('connection-status');
+        const updatesList = document.getElementById('updates');
+
+
+        // Function to add updates to the table
+        function addUpdate(data, type) {
+            try {
+                const tr = document.createElement('tr');
+                tr.className = type;
+                
+                // Format the timestamp
+                const timestamp = data.timestamp ? new Date(data.timestamp).toLocaleString() : '';
+                
+                // Create the table row content
+                tr.innerHTML = `
+                    <td><strong>${type.toUpperCase()}</strong></td>
+                    <td>${data._id || 'N/A'}</td>
+                    <td>${data.action || 'N/A'}</td>
+                    <td>${data.metadata?.repository || 'N/A'}</td>
+                    <td>${data.from_branch || 'N/A'}</td>
+                    <td>${data.to_branch || 'N/A'}</td>
+                    <td>${data.author || 'N/A'}</td>
+                    <td>${timestamp}</td>
+                `;
+                
+                const tbody = document.getElementById('updates');
+                tbody.insertBefore(tr, tbody.firstChild); // Add to top
+
+                // Keep only the last 50 updates to prevent UI overload
+                while (tbody.children.length > 50) {
+                    tbody.removeChild(tbody.lastChild);
+                }
+                
+                debugLog(`Added ${type} update for ID: ${data._id || 'unknown'}.`);
+            } catch (error) {
+                debugLog(`Error adding update: ${error.message}. Data: ${JSON.stringify(data)}.`, true);
+            }
+        }
+
+        // --- Socket.IO Initialization ---
+        debugLog('Initializing Socket.IO connection...');
+        
+        // Define the server URL (ensure this matches your Flask app's host/port)
+        const SERVER_URL = 'http://localhost:5000'; 
+
+        const socket = io(SERVER_URL, {
+            transports: ['websocket'], // Prefer WebSocket
+            reconnection: true,
+            reconnectionAttempts: Infinity, 
+            reconnectionDelay: 5000, // Start with 1 second delay
+            reconnectionDelayMax: 15000, // Max 5 seconds delay
+            randomizationFactor: 0.5, // Add some randomness to delay
+            timeout: 130000, // Client connection timeout (e.g., 130 seconds)
+        });
+
+        // --- Helper function to send client logs to server ---
+        function sendClientLogToServer(logData) {
+            if (socket.connected) {
+                socket.emit('client_log_report', logData);
+            } else {
+                // If socket is not connected, try to buffer and send on reconnect
+                // Or simply log to console if server is truly unreachable
+                console.warn("Socket not connected, cannot send client log to server:", logData);
+            }
+        }
+
+        // --- Socket.IO Event Handlers ---
+
+        // Connection events
+        socket.on('connect', () => {
+            debugLog(`Connected with Socket ID: ${socket.id}. Transport: ${socket.io.engine.transport.name}.`);
+            statusDiv.textContent = 'Connected';
+            statusDiv.style.backgroundColor = '#4CAF50';
+        });
+
+        socket.on('connection_established', (data) => {
+            // This is a custom event from your server
+            debugLog(`Server confirmed connection established. Client ID: ${data.clientId || 'N/A'}.`);
+        });
+
+        // Initial Data Event (for existing actions on connect)
+        socket.on('initial_data', (payload) => {
+            try {
+                debugLog(`Received initial data: ${payload.count || 0} items.`);
+                
+                if (payload.error) {
+                    debugLog(`Initial data error from server: ${payload.error}.`, true);
+                    // Also report this error to the server
+                    sendClientLogToServer({
+                        type: 'initial_data_error',
+                        message: payload.error,
+                        timestamp: new Date().toISOString(),
+                        clientId: socket.id
+                    });
+                    return;
+                }
+                
+                if (payload.actions && Array.isArray(payload.actions)) {
+                    payload.actions.forEach((doc, index) => {
+                        try {
+                            addUpdate(doc, 'new'); // Mark initial data as 'new' for styling
+                        } catch (error) {
+                            debugLog(`Error processing initial data item ${index}: ${error.message}.`, true);
+                            sendClientLogToServer({
+                                type: 'initial_data_processing_error',
+                                message: error.message,
+                                dataItem: doc,
+                                timestamp: new Date().toISOString(),
+                                clientId: socket.id
+                            });
+                        }
+                    });
+                } else {
+                    debugLog('Initial data payload does not contain an "actions" array.');
+                }
+            } catch (error) {
+                debugLog(`Error processing initial data payload: ${error.message}.`, true);
+                sendClientLogToServer({
+                    type: 'initial_data_payload_error',
+                    message: error.message,
+                    payload: payload,
+                    timestamp: new Date().toISOString(),
+                    clientId: socket.id
+                });
+            }
+        });
+
+        // MongoDB Change Event Handlers
+        const events = {
+            'git_action_new': 'new',
+            'git_action_updated': 'updated',
+            'git_action_replaced': 'replaced',
+            'git_action_deleted': 'deleted'
+        };
+
+        Object.entries(events).forEach(([eventName, className]) => {
+            socket.on(eventName, (data) => {
+                try {
+                    debugLog(`Received "${eventName}" event.`);
+                    addUpdate(data, className);
+                } catch (error) {
+                    debugLog(`Error handling "${eventName}" event: ${error.message}. Data: ${JSON.stringify(data)}.`, true);
+                    sendClientLogToServer({
+                        type: 'event_handler_error',
+                        eventName: eventName,
+                        message: error.message,
+                        data: data,
+                        timestamp: new Date().toISOString(),
+                        clientId: socket.id
+                    });
+                }
+            });
+        });
+
+        // --- Error and Disconnect Handlers ---
+
+        socket.on('connect_error', (error) => {
+            const errorTime = new Date().toLocaleTimeString();
+            const logMsg = `[${errorTime}] Connection Error: ${error.message || 'Unknown error'}.`;
+            debugLog(logMsg, true);
+            statusDiv.textContent = 'Connection Error';
+            statusDiv.style.backgroundColor = '#f44336';
+            
+            // Report connect_error to server
+            sendClientLogToServer({
+                type: 'connect_error',
+                message: error.message,
+                error: error.toString(), // Convert error object to string
+                timestamp: new Date().toISOString(),
+                clientId: socket.id
+            });
+        });
+
+        socket.on('disconnect', (reason, details) => {
+            const disconnectTime = new Date().toLocaleTimeString();
+            let logMessage = `[${disconnectTime}] Client DISCONNECTED. Reason: ${reason}.`;
+
+            const reportData = {
+                type: 'disconnect',
+                reason: reason,
+                timestamp: new Date().toISOString(),
+                clientId: socket.id
+            };
+
+            if (details) {
+                logMessage += ` (Details: ${JSON.stringify(details)}`;
+                reportData.details = details; // Include full details object
+                if (details.message) {
+                    logMessage += `, Message: ${details.message}`;
+                }
+                if (details.description) {
+                    logMessage += `, Description: ${details.description}`;
+                }
+                if (details.context) {
+                    logMessage += `, Context: ${details.context}`;
+                }
+                if (details.code) {
+                    logMessage += `, Code: ${details.code}`;
+                }
+                logMessage += `)`;
+            }
+            debugLog(logMessage, true); // Log disconnects as errors in UI
+            statusDiv.textContent = `Disconnected: ${reason}`;
+            statusDiv.style.backgroundColor = '#FF5722'; // Orange for disconnected
+
+            // Send the detailed disconnect report to the server
+            sendClientLogToServer(reportData);
+        });
+
+        // --- Reconnection Handlers ---
+
+        socket.on('reconnect', (attemptNumber) => {
+            debugLog(`Reconnected successfully after ${attemptNumber} attempts.`);
+            statusDiv.textContent = 'Reconnected';
+            statusDiv.style.backgroundColor = '#4CAF50';
+            // Report successful reconnect to server
+            sendClientLogToServer({
+                type: 'reconnect_success',
+                attempts: attemptNumber,
+                timestamp: new Date().toISOString(),
+                clientId: socket.id
+            });
+        });
+
+        socket.on('reconnect_attempt', (attemptNumber) => {
+            debugLog(`Reconnection attempt ${attemptNumber}...`);
+            statusDiv.textContent = `Reconnecting... (Attempt ${attemptNumber})`;
+            statusDiv.style.backgroundColor = '#FF9800'; // Yellow for reconnecting
+        });
+
+        socket.on('reconnect_error', (error) => {
+            debugLog(`Reconnection error: ${error.message || 'Unknown error'}.`, true);
+            sendClientLogToServer({
+                type: 'reconnect_error',
+                message: error.message,
+                error: error.toString(),
+                timestamp: new Date().toISOString(),
+                clientId: socket.id
+            });
+        });
+
+        socket.on('reconnect_failed', () => {
+            debugLog('Reconnection failed permanently.', true);
+            statusDiv.textContent = 'Connection Failed';
+            statusDiv.style.backgroundColor = '#f44336';
+            sendClientLogToServer({
+                type: 'reconnect_failed',
+                timestamp: new Date().toISOString(),
+                clientId: socket.id
+            });
+        });
+
+        // --- Generic Event Catch-all for Debugging ---
+        socket.onAny((eventName, ...args) => {
+            const ignoredEvents = [
+                'connect', 'disconnect', 'connect_error', 'connection_established', 'initial_data',
+                'git_action_new', 'git_action_updated', 'git_action_replaced', 'git_action_deleted',
+                'reconnect', 'reconnect_attempt', 'reconnect_error', 'reconnect_failed',
+                'ping', 'pong', 'client_log_report' // Ignore the new report event itself
+            ];
+            if (!ignoredEvents.includes(eventName)) {
+                const logMsg = `Unhandled Socket.IO event: "${eventName}". Args: ${JSON.stringify(args)}.`;
+                debugLog(logMsg);
+                sendClientLogToServer({
+                    type: 'unhandled_event',
+                    eventName: eventName,
+                    args: args,
+                    timestamp: new Date().toISOString(),
+                    clientId: socket.id
+                });
+            }
+        });
+
+        debugLog('Socket.IO client setup complete.');
+    </script>
+</body>
+</html>
